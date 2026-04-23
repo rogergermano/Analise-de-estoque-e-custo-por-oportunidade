@@ -1,6 +1,9 @@
 # Analise-de-estoque-e-custo-por-oportunidade
 Script Python para gestão de estoque e custo de oportunidade. Utiliza lógica anti-falsa rotatividade baseada no tempo de investimento, protegendo a análise contra vendas isoladas de itens antigos. Inclui cálculo de margem real corrigida, categorização por faixas de lucratividade e dashboards formatados no padrão monetário brasileiro.
 
+# Ambiente de Execução
+Nota importante: Este script foi projetado especificamente para rodar no Google Colab. Ele utiliza bibliotecas nativas para autenticação com serviços Google (google.colab, gspread) e pressupõe uma estrutura de diretórios baseada em nuvem.
+
 # Analise-de-estoque-e-custo-por-oportunidade
 
 Este projeto é uma ferramenta de Business Intelligence voltada para a saúde financeira do estoque. Diferente de análises comuns, este script utiliza o Custo de Oportunidade e uma Lógica Anti-Falsa Rotatividade para identificar capital de giro que está sendo corroído pelo tempo, mesmo em itens que tiveram vendas recentes.
