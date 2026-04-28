@@ -21,4 +21,4 @@ The input file (CSV or Excel) must include:
 - Last Sale: Last sold date.
 
 # Customization
-If your database uses different column names, simply update the mapping within the processar_dados function. The script is sector-agnostic, performing effectively for construction materials, auto parts, retail, and wholesale distributors.
+If your database uses different column names, simply update the `column_mapping` within the `main` function. The script is sector-agnostic, performing effectively for construction materials, auto parts, retail, and wholesale distributors.

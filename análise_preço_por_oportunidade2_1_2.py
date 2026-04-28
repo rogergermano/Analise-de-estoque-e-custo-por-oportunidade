@@ -3,26 +3,30 @@
 # --- CÉLULA 1: IMPORTS E CONFIGURAÇÕES ---
 #------------------------------------------
 
-# 1.1 Imports e intalações
-!pip install fpdf gspread oauth2client
-
+# 1.1 Imports
 import locale
 import warnings
-warnings.filterwarnings('ignore')
+import sys
+
+warnings.filterwarnings('ignore', category=FutureWarning)
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 from fpdf import FPDF
-from google.colab import auth
-import gspread
-from google.auth import default
 import logging
-from typing import Optional, List, Tuple
-import warnings
-warnings.filterwarnings('ignore')
-import os # Adicionado para manipulação de caminhos de arquivo
+from typing import Optional, List
+
+# 1.1.1 Imports condicionais para Google Colab
+try:
+    from google.colab import auth
+    import gspread
+    from google.auth import default
+    COLAB_DISPONIVEL = True
+except ImportError:
+    COLAB_DISPONIVEL = False
 
 # 1.2 Configuração de logging
 logging.basicConfig(
@@ -36,13 +40,23 @@ logger = logging.getLogger(__name__)
 # Aplica separador de milhar "."
 try:
     locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
-except:
+except locale.Error:
     locale.setlocale(locale.LC_ALL, '')
 
 # 1.4 Constantes de configuração
 TAXA_JUROS_MENSAL = 0.01  # 1% ao mês - custo de oportunidade
 MARGEM_ALVO = 0.30  # 30% de margem desejada
 DIAS_POR_MES = 30.44  # Média de dias por mês para cálculos precisos
+
+# 1.5 Constantes de regra de negócio
+MARGEM_MINIMA_SEGURANCA = 15.0  # Margem mínima aceitável (%)
+TEMPO_LIMITE_INVESTIMENTO = 12  # Meses para considerar investimento antigo
+MESES_OBSOLESCENCIA = 18  # Meses para considerar item obsoleto
+MESES_SEM_VENDA_REVISAO = 3  # Meses sem venda para acionar revisão
+MESES_INVESTIMENTO_REVISAO = 6  # Meses de investimento para acionar revisão
+MARGEM_VISUAL_INFERIOR = -30  # Limite inferior da margem visual para gráficos
+MARGEM_VISUAL_SUPERIOR = 100  # Limite superior da margem visual para gráficos
+DESCRICAO_MAX_CHARS = 50  # Máximo de caracteres para descrição no PDF
 
 #---------------------------------------------
 # --- CÉLULA 2: FUNÇÕES DE CORE BUSINESS ---
@@ -81,7 +95,7 @@ def preparar_datas(df: pd.DataFrame) -> pd.DataFrame:
     """
     Converte colunas de data para datetime e calcula métricas de tempo.
     Args:
-        df: DataFrame com colunas 'Ultima Compra' e 'Ultima Saída'
+        df: DataFrame com colunas 'Ultima Entrada' e 'Ultima Saída'
     Returns:
         DataFrame com datas convertidas e novas colunas de tempo
     """
@@ -138,7 +152,7 @@ def calcular_metricas_financeiras(
     df['Custo'] = pd.to_numeric(df['Custo'], errors='coerce').fillna(0)
     df['Preço'] = pd.to_numeric(df['Preço'], errors='coerce').fillna(0)
 
-    # 2.3.2 Certificar que 'meses_investimento' ejam numéricos e preencha os valores NaN com 0.
+    # 2.3.2 Certificar que 'meses_investimento' sejam numéricos e preencha os valores NaN com 0.
     df['meses_investimento'] = pd.to_numeric(df['meses_investimento'], errors='coerce').fillna(0)
 
     # 2.3.3 Custo corrigido pelo tempo de investimento (juros compostos)
@@ -147,98 +161,124 @@ def calcular_metricas_financeiras(
 
     # 2.3.4 Cálculo da margem real atual com proteção contra divisão por zero
     df['margem_real_atual'] = np.where(
-    df['Preço'] > 0,
-    ((df['Preço'] - df['custo_corrigido']) / df['Preço']) * 100,
-    -100.0 # Preço zero ou negativo define perda total (-100%)
+        df['Preço'] > 0,
+        ((df['Preço'] - df['custo_corrigido']) / df['Preço']) * 100,
+        -100.0  # Preço zero ou negativo define perda total (-100%)
     )
 
     # --- TRATAMENTO DE DISCREPÂNCIAS PARA GRÁFICOS ---
-    # 2.3.5 Cria margem_visual travada em -30% para não quebrar a escala dos gráficos
-    df['margem_visual'] = df['margem_real_atual'].clip(lower=-30, upper=100)
+    # 2.3.5 Cria margem_visual travada para não quebrar a escala dos gráficos
+    df['margem_visual'] = df['margem_real_atual'].clip(
+        lower=MARGEM_VISUAL_INFERIOR, upper=MARGEM_VISUAL_SUPERIOR
+    )
 
     # 2.3.6 Cria Faixas de Margem (Bucketing)
     bins = [-float('inf'), -0.01, 15, 30, 50, float('inf')]
     labels = ['Prejuízo Real', 'Margem Crítica (0-15%)', 'Margem Padrão (15-30%)', 'Margem Saudável (30-50%)', 'Alta Lucratividade']
     df['faixa_margem'] = pd.cut(df['margem_real_atual'], bins=bins, labels=labels)
 
-    # 2.3.7 Preencher quaisquer NaNs restantes em margem_real_atual (por exemplo, se o custo_corrigido de alguma forma se tornou NaN) com -100,0
+    # 2.3.7 Preencher quaisquer NaNs restantes em margem_real_atual com -100,0
     df['margem_real_atual'] = df['margem_real_atual'].fillna(-100.0)
 
     # 2.3.8 Sugestão de preço para atingir a margem alvo
     if (1 - margem_alvo) == 0:
-        df['sugestao_preco'] = np.inf # Tratar caso margem_alvo é 1,0
+        df['sugestao_preco'] = np.inf
     else:
         df['sugestao_preco'] = (df['custo_corrigido'] / (1 - margem_alvo)).round(2)
-    df['sugestao_preco'] = df['sugestao_preco'].fillna(0).replace([np.inf, -np.inf], 0) # Tratar inf/NaN aqui também.
+    df['sugestao_preco'] = df['sugestao_preco'].fillna(0).replace([np.inf, -np.inf], 0)
 
     # 2.3.9 Prejuízo identificado
-    df['em_prejuizo'] = np.where(
-    (df['custo_corrigido'] > df['Preço']) |
-    ((df['meses_investimento'] >= 12) & (df['margem_real_atual'] < 15)),
-    True, False
-)
+    df['em_prejuizo'] = (
+        (df['custo_corrigido'] > df['Preço']) |
+        ((df['meses_investimento'] >= TEMPO_LIMITE_INVESTIMENTO) &
+         (df['margem_real_atual'] < MARGEM_MINIMA_SEGURANCA))
+    )
 
     logger.info("Métricas financeiras calculadas com sucesso")
     return df
 
 # 2.4 Define estratégia para os produtos
-def definir_acao_final(row):
+def definir_acao_final(row: pd.Series) -> str:
     """
     Define a estratégia comercial baseada no tempo de investimento, giro e margem real.
     Aplica lógica anti-falsa rotatividade para proteger o capital de giro.
     Args:
-        row (pd.Series): Linha do DataFrame contendo as colunas 'Preço', 'custo_corrigido',
-                         'meses_investimento', 'meses_sem_venda' e 'margem_real_atual'.
+        row: Linha do DataFrame contendo as colunas 'Preço', 'custo_corrigido',
+             'meses_investimento', 'meses_sem_venda' e 'margem_real_atual'.
     Returns:
-        str: Categoria da estratégia (ex: 'Liquidação Urgente', 'Preço Saudável', etc).
+        Categoria da estratégia (ex: 'Liquidação Urgente', 'Preço Saudável', etc).
     """
-
-    # 2.4.1 Parâmetros de Gestão
-    margem_minima_seguranca = 15.0
-    tempo_limite_investimento = 12 # 1 ano
 
     # 2.4.2 -1. LIQUIDAÇÃO URGENTE (Prejuízo nominal ou corrosão crítica de margem)
     if (row['Preço'] < row['custo_corrigido']) or \
-       (row['meses_investimento'] >= tempo_limite_investimento and row['margem_real_atual'] < margem_minima_seguranca):
+       (row['meses_investimento'] >= TEMPO_LIMITE_INVESTIMENTO and row['margem_real_atual'] < MARGEM_MINIMA_SEGURANCA):
         return 'Liquidação Urgente'
 
     # 2.4.3 -2. ANTI-FALSA ROTATIVIDADE
     # Se o capital está preso há mais de 12 meses, mesmo com venda este mês,
     # ele NÃO é saudável. Precisa baixar estoque para recuperar o caixa.
-    if row['meses_investimento'] >= tempo_limite_investimento and row['meses_sem_venda'] <= 1:
+    if row['meses_investimento'] >= TEMPO_LIMITE_INVESTIMENTO and row['meses_sem_venda'] <= 1:
         return 'Monitorar Giro (Estoque Antigo)'
 
     # 2.4.4 -3. OBSOLESCÊNCIA (Parado há mais de 18 meses independente de qualquer fator)
-    if row['meses_investimento'] >= 18:
+    if row['meses_investimento'] >= MESES_OBSOLESCENCIA:
         return 'Liquidação (Item Obsoleto)'
 
     # 2.4.5 -4. REVISÃO COMERCIAL (O produto ainda tem margem, mas está "dormindo")
-    if row['meses_sem_venda'] > 3 and row['meses_investimento'] > 6:
+    if row['meses_sem_venda'] > MESES_SEM_VENDA_REVISAO and row['meses_investimento'] > MESES_INVESTIMENTO_REVISAO:
         return 'Revisar Precificação'
 
     # 2.4.6 -5. AJUSTE DE ESTOQUE ANTIGO (Tem giro, mas o custo corrigido está subindo)
-    if row['meses_investimento'] > 6 and row['meses_sem_venda'] <= 1:
+    if row['meses_investimento'] > MESES_INVESTIMENTO_REVISAO and row['meses_sem_venda'] <= 1:
         return 'Ajustar Margem (Estoque Antigo)'
 
     # 2.4.7 -6. PADRÃO
     return 'Preço Saudável'
 
-# 2.5 Aplica a logica sobre os produtos
+# 2.5 Aplica a logica sobre os produtos (versão vetorizada)
 def aplicar_estrategias(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aplica a lógica de definição de estratégia e atualiza o status de prejuízo.
+    Aplica a lógica de definição de estratégia usando operações vetorizadas.
     Args:
         df: DataFrame com as métricas financeiras já calculadas.
     Returns:
-        DataFrame com as colunas 'estrategia' e 'em_prejuizo' atualizadas.
+        DataFrame com a coluna 'estrategia' adicionada.
     """
     df = df.copy()
-    df['estrategia'] = df.apply(definir_estrategia_com_liquidez, axis=1)
-    df['em_prejuizo'] = np.where(
-    (df['custo_corrigido'] > df['Preço']) |
-    ((df['meses_investimento'] >= 12) & (df['margem_real_atual'] < 15)),
-    True, False
-)
+
+    # 2.5.1 Definição vetorizada das estratégias (mais rápido que apply)
+    conditions = [
+        # 1. Liquidação Urgente
+        (df['Preço'] < df['custo_corrigido']) |
+        ((df['meses_investimento'] >= TEMPO_LIMITE_INVESTIMENTO) &
+         (df['margem_real_atual'] < MARGEM_MINIMA_SEGURANCA)),
+
+        # 2. Anti-falsa rotatividade
+        (df['meses_investimento'] >= TEMPO_LIMITE_INVESTIMENTO) &
+        (df['meses_sem_venda'] <= 1),
+
+        # 3. Obsolescência
+        (df['meses_investimento'] >= MESES_OBSOLESCENCIA),
+
+        # 4. Revisão comercial
+        (df['meses_sem_venda'] > MESES_SEM_VENDA_REVISAO) &
+        (df['meses_investimento'] > MESES_INVESTIMENTO_REVISAO),
+
+        # 5. Ajuste de estoque antigo
+        (df['meses_investimento'] > MESES_INVESTIMENTO_REVISAO) &
+        (df['meses_sem_venda'] <= 1),
+    ]
+
+    choices = [
+        'Liquidação Urgente',
+        'Monitorar Giro (Estoque Antigo)',
+        'Liquidação (Item Obsoleto)',
+        'Revisar Precificação',
+        'Ajustar Margem (Estoque Antigo)',
+    ]
+
+    df['estrategia'] = np.select(conditions, choices, default='Preço Saudável')
+
     logger.info("Estratégias de precificação aplicadas com sucesso.")
     return df
 
@@ -266,12 +306,9 @@ def limpar_para_exportacao(df: pd.DataFrame) -> List[List]:
 
     for col in df_export.columns:
         if col in currency_cols and pd.api.types.is_numeric_dtype(df_export[col]):
-            # Aplicar formatação de moeda para colunas monetárias
-            # Substituir Inf/-Inf por NaN antes de formatar para que formatar_moeda lide com eles
             df_export[col] = df_export[col].replace([np.inf, -np.inf], np.nan)
             df_export[col] = df_export[col].apply(lambda x: formatar_moeda(x))
         elif pd.api.types.is_numeric_dtype(df_export[col]):
-            # Lógica original para outras colunas numéricas
             df_export[col] = df_export[col].replace([np.inf, -np.inf], np.nan)
             df_export[col] = df_export[col].apply(lambda x: None if pd.isna(x) else x)
 
@@ -308,6 +345,10 @@ def exportar_para_google_sheets(df: pd.DataFrame, nome_planilha: str) -> bool:
     Returns:
         True se exportado com sucesso, False caso contrário
     """
+    if not COLAB_DISPONIVEL:
+        logger.warning("Google Colab não disponível. Exportação para Google Sheets ignorada.")
+        return False
+
     try:
         # 4.1.2 Autenticação
         auth.authenticate_user()
@@ -340,7 +381,7 @@ def exportar_para_google_sheets(df: pd.DataFrame, nome_planilha: str) -> bool:
 def gerar_pdf_acoes(
     df_acoes: pd.DataFrame,
     nome_arquivo: str = "Relatorio_Acao_Imediata.pdf",
-    titulo: str = "GUIA DE VENDAS E DESCONTOS - COMERCIAL AVENIDA",
+    titulo: str = "GUIA DE VENDAS E DESCONTOS",
     resumo_executivo: Optional[dict] = None
 ) -> bool:
     """
@@ -388,7 +429,7 @@ def gerar_pdf_acoes(
 
         # 4.2.4 Ajuste das larguras para caber na página (total ~278mm para A4 paisagem)
         cabecalhos = ['SKU', 'Produto', 'Estoque', 'Investimento', 'Sem Venda', 'Margem Real', 'Status', 'Sugestão de Preço']
-        larguras = [20, 70, 23, 28, 28, 25, 42, 42] # Ajustado 'Produto' para 70, adicionado 'SKU' com 20
+        larguras = [20, 70, 23, 28, 28, 25, 42, 42]
 
         for i, cabecalho in enumerate(cabecalhos):
             pdf.cell(larguras[i], 10, cabecalho, border=1, align='C', fill=True)
@@ -396,21 +437,19 @@ def gerar_pdf_acoes(
 
         # 4.2.5 Dados
         pdf.set_font("Arial", '', 9)
-        for _, row in df_acoes.sort_values('meses_investimento', ascending=False).iterrows():
-            # Truncar descrição se muito longa
-            descricao = str(row['Descrição'])[:50]
-            if len(str(row['Descrição'])) > 50:
+        for row in df_acoes.sort_values('meses_investimento', ascending=False).itertuples():
+            descricao = str(row.Descrição)[:DESCRICAO_MAX_CHARS]
+            if len(str(row.Descrição)) > DESCRICAO_MAX_CHARS:
                 descricao += "..."
 
-            # Adicionar linha
-            pdf.cell(larguras[0], 8, str(row['SKU']), border=1, align='C')
+            pdf.cell(larguras[0], 8, str(row.SKU), border=1, align='C')
             pdf.cell(larguras[1], 8, descricao.encode('latin-1', 'replace').decode('latin-1'), border=1)
-            pdf.cell(larguras[2], 8, str(row['Estoque']), border=1, align='C')
-            pdf.cell(larguras[3], 8, f"{row['meses_investimento']}m", border=1, align='C')
-            pdf.cell(larguras[4], 8, f"{row['meses_sem_venda']}m", border=1, align='C')
-            pdf.cell(larguras[5], 8, f"{row['margem_real_atual']:.1f}%", border=1, align='C') # Nova coluna de margem
-            pdf.cell(larguras[6], 8, row['estrategia'], border=1, align='C')
-            pdf.cell(larguras[7], 8, formatar_moeda(row['sugestao_preco']), border=1, align='R')
+            pdf.cell(larguras[2], 8, str(row.Estoque), border=1, align='C')
+            pdf.cell(larguras[3], 8, f"{row.meses_investimento}m", border=1, align='C')
+            pdf.cell(larguras[4], 8, f"{row.meses_sem_venda}m", border=1, align='C')
+            pdf.cell(larguras[5], 8, f"{row.margem_real_atual:.1f}%", border=1, align='C')
+            pdf.cell(larguras[6], 8, row.estrategia, border=1, align='C')
+            pdf.cell(larguras[7], 8, formatar_moeda(row.sugestao_preco), border=1, align='R')
             pdf.ln()
 
         # 4.2.6 Rodapé com data de geração
@@ -475,9 +514,9 @@ def gerar_grafico_analise(df: pd.DataFrame, salvar_imagem: bool = False):
     """
     Cria uma análise visual de dispersão entre Preço de Venda e Margem Real.
     Utiliza uma 'margem visual' limitada para evitar distorções de escala nos eixos.
-        Args:
-        df (pd.DataFrame): DataFrame processado.
-        salvar_imagem (bool): Se True, exporta o gráfico como arquivo PNG.
+    Args:
+        df: DataFrame processado.
+        salvar_imagem: Se True, exporta o gráfico como arquivo PNG.
     Returns:
         None: Exibe o gráfico ou salva o arquivo conforme parâmetro.
     """
@@ -486,11 +525,11 @@ def gerar_grafico_analise(df: pd.DataFrame, salvar_imagem: bool = False):
     # 4.5.1 Cores personalizadas para cada estratégia
     cores = {
         'Preço Saudável': 'green',
-        'Revisar Precificação / Queima': 'orange',
+        'Revisar Precificação': 'orange',
         'Liquidação Urgente': 'red',
         'Liquidação (Item Obsoleto)': 'brown',
         'Ajustar Margem (Estoque Antigo)': 'blue',
-        'Otimizar Margem': 'purple'
+        'Monitorar Giro (Estoque Antigo)': 'purple',
     }
 
     # 4.5.2 Gráfico de dispersão
@@ -536,7 +575,7 @@ def gerar_grafico_analise(df: pd.DataFrame, salvar_imagem: bool = False):
     plt.tight_layout()
 
     if salvar_imagem:
-        plt.savefig('analise_estoque_scatter.png', dpi=300, bbox_inches='tight') # Renamed filename
+        plt.savefig('analise_estoque_scatter.png', dpi=300, bbox_inches='tight')
         logger.info("Gráfico de dispersão salvo como 'analise_estoque_scatter.png'")
 
     plt.show()
@@ -558,15 +597,15 @@ def gerar_grafico_analise(df: pd.DataFrame, salvar_imagem: bool = False):
 
     plt.tight_layout()
     if salvar_imagem:
-        plt.savefig('analise_estoque_bars.png', dpi=300, bbox_inches='tight') # Added save for second plot
+        plt.savefig('analise_estoque_bars.png', dpi=300, bbox_inches='tight')
         logger.info("Gráfico de barras salvo como 'analise_estoque_bars.png'")
     plt.show()
 
     logger.info("Gráficos gerados com sucesso")
 
-# 4.6 Gera gráfico de feixa de produtos
-def gerar_grafico_faixas(df):
-    """Gera um gráfico de barras com formatação de moeda brasileira e milhar com ponto"""
+# 4.6 Gera gráfico de faixa de produtos
+def gerar_grafico_faixas(df: pd.DataFrame):
+    """Gera um gráfico de barras com formatação de moeda brasileira e milhar com ponto."""
     plt.figure(figsize=(12, 6))
 
     # 4.6.1 Agrupa o valor que está "parado" em estoque por faixa
@@ -575,18 +614,17 @@ def gerar_grafico_faixas(df):
     # 4.6.2 Capturando o retorno do gráfico na variável 'ax'
     ax = sns.barplot(data=analise_faixa, x='faixa_margem', y='custo_corrigido', palette='magma')
 
-    plt.title('Capital Investido por Faixa de Margem (Visão Comercial Avenida)', fontsize=14, fontweight='bold')
+    plt.title('Capital Investido por Faixa de Margem', fontsize=14, fontweight='bold')
     plt.ylabel('Total em Estoque (R$)', fontsize=12)
     plt.xlabel('Faixas de Margem Real', fontsize=12)
     plt.xticks(rotation=30)
 
-    # 4.6.3 Formata os rótulos do eixo Y (lateral do gráfico)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, loc: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')))
+    # 4.6.3 Formata os rótulos do eixo Y usando formatar_moeda
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, loc: formatar_moeda(x)))
 
     # 4.6.4 Adiciona o valor em cima das barras
     for i, v in enumerate(analise_faixa['custo_corrigido']):
-        # Formatação manual: milhar com ponto e decimal com vírgula
-        valor_formatado = f"R$ {v:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+        valor_formatado = formatar_moeda(v)
         plt.text(i, v + (v * 0.02), valor_formatado, ha='center', fontweight='bold', fontsize=10)
 
     plt.tight_layout()
@@ -595,7 +633,7 @@ def gerar_grafico_faixas(df):
 # 4.7 Cria PDF com gráficos
 def gerar_pdf_graficos(
     nome_arquivo: str = "Relatorio_Graficos_Estoque.pdf",
-    titulo: str = "ANÁLISE GRÁFICA DO ESTOQUE - COMERCIAL AVENIDA"
+    titulo: str = "ANÁLISE GRÁFICA DO ESTOQUE"
 ) -> bool:
     """
     Gera um PDF com os gráficos da análise.
@@ -669,11 +707,11 @@ def main(caminho_arquivo: str = '/content/sample_data/base estoque parado.xlsx')
             'estoquefisico': 'Estoque',
             'custo': 'Custo',
             'preço': 'Preço',
-            'preco': 'Preço', # Adicionado para robustez
+            'preco': 'Preço',
             'ultima entrada': 'Ultima Entrada',
             'ultima saída': 'Ultima Saída',
             'descrição': 'Descrição',
-            'descricao': 'Descrição', # Adicionado para robustez
+            'descricao': 'Descrição',
             'sku': 'SKU'
         }
 
@@ -681,7 +719,6 @@ def main(caminho_arquivo: str = '/content/sample_data/base estoque parado.xlsx')
         renamed_columns = {}
         for old_name_lower, new_name_capitalized in column_mapping.items():
             if old_name_lower in df.columns:
-                # Somente renomeia se o nome capitalizado ainda não existe
                 if new_name_capitalized not in df.columns:
                     renamed_columns[old_name_lower] = new_name_capitalized
 
@@ -710,17 +747,16 @@ def main(caminho_arquivo: str = '/content/sample_data/base estoque parado.xlsx')
         imprimir_resumo_estoque(resumo)
 
         # 5.6 Exportação para Google Sheets
-        exportar_para_google_sheets(df, "Relatorio_Custo_Oportunidade_Avenida")
+        exportar_para_google_sheets(df, "Relatorio_Custo_Oportunidade")
 
         # 5.7 Geração do PDF com ações imediatas
         df_acoes = df[(df['estrategia'] != 'Preço Saudável') & (df['Estoque'] > 0)]
         gerar_pdf_acoes(df_acoes, resumo_executivo=resumo)
 
         # 5.8. Geração dos gráficos e PDF de gráficos
-        # Limita a margem para o intervalo de -50% a 100% apenas para o gráfico
         df_plot = df.copy()
-        df_plot['margem_visual'] = df_plot['margem_visual'].clip(lower=-50, upper=100)
-        gerar_grafico_analise(df, salvar_imagem=True)
+        df_plot['margem_visual'] = df_plot['margem_visual'].clip(lower=-50, upper=MARGEM_VISUAL_SUPERIOR)
+        gerar_grafico_analise(df_plot, salvar_imagem=True)
         gerar_grafico_faixas(df)
         gerar_pdf_graficos()
 
@@ -730,13 +766,13 @@ def main(caminho_arquivo: str = '/content/sample_data/base estoque parado.xlsx')
         print("="*60)
         colunas_mostrar = ['SKU', 'Descrição', 'Estoque', 'meses_investimento',
                           'meses_sem_venda', 'margem_real_atual', 'sugestao_preco', 'estrategia']
-        display(df[colunas_mostrar].head())
+        print(df[colunas_mostrar].head().to_string())
 
         logger.info("="*60)
         logger.info("ANÁLISE CONCLUÍDA COM SUCESSO!")
         logger.info("="*60)
 
-        return df # Return the DataFrame
+        return df
 
     except Exception as e:
         logger.error(f"Erro fatal na execução da análise: {str(e)}")
@@ -747,17 +783,18 @@ def main(caminho_arquivo: str = '/content/sample_data/base estoque parado.xlsx')
 #---------------------------
 
 if __name__ == "__main__":
-    # Executa a análise e armazena o DataFrame resultante em uma variável global 'df'
+    # Executa a análise e armazena o DataFrame resultante
     df = main('/content/sample_data/base estoque parado - Página1.csv')
 
-df_margem_negativa = df[df['margem_real_atual'] < -20]
+    # Gera relatório adicional para produtos com margem muito negativa
+    df_margem_negativa = df[df['margem_real_atual'] < -20]
 
-if not df_margem_negativa.empty:
-    gerar_pdf_acoes(
-        df_margem_negativa,
-        nome_arquivo="Relatorio_Produtos_Margem_Muito_Negativa.pdf",
-        titulo="RELATÓRIO DE PRODUTOS COM MARGEM < -20%"
-    )
-    print("Relatório de produtos com margem muito negativa gerado com sucesso: Relatorio_Produtos_Margem_Muito_Negativa.pdf")
-else:
-    print("Nenhum produto encontrado com margem real menor que -20%.")
+    if not df_margem_negativa.empty:
+        gerar_pdf_acoes(
+            df_margem_negativa,
+            nome_arquivo="Relatorio_Produtos_Margem_Muito_Negativa.pdf",
+            titulo="RELATÓRIO DE PRODUTOS COM MARGEM < -20%"
+        )
+        print("Relatório de produtos com margem muito negativa gerado com sucesso: Relatorio_Produtos_Margem_Muito_Negativa.pdf")
+    else:
+        print("Nenhum produto encontrado com margem real menor que -20%.")

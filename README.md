@@ -22,9 +22,9 @@ O arquivo de entrada (CSV ou Excel) deve conter:
 - Estoque: Quantidade física disponível.
 - Custo: Preço de compra original.
 - Preço: Preço de venda atual.
-- Ultima Compra: Data de entrada do lote.
+- Ultima Entrada: Data de entrada do lote.
 - Ultima Saída: Data da última venda realizada.
 
 Como Adaptar
 
-Se o seu banco de dados utiliza nomes de colunas diferentes, basta ajustar o mapeamento na função processar_dados. O script foi desenhado para ser agnóstico ao setor, funcionando bem em varejos de construção, autopeças, vestuário e distribuidores.
+Se o seu banco de dados utiliza nomes de colunas diferentes, basta ajustar o mapeamento `column_mapping` na função `main`. O script foi desenhado para ser agnóstico ao setor, funcionando bem em varejos de construção, autopeças, vestuário e distribuidores.
