@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Arquivos gerados pelo script
+*.pdf
+analise_estoque_scatter.png
+analise_estoque_bars.png
+
+# Dados sensíveis
+.env
+*.secrets
+
+# OS
+.DS_Store
+Thumbs.db
